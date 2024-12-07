@@ -102,17 +102,17 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
 
     for filter_row in nl.sequential_range(filter_height):
         for filter_col in nl.sequential_range(filter_width):
-            # Slice over the first dimension (partition dimension) explicitly
-            slice_W = W_sbuf[:, :, :, :, filter_row, filter_col]  # Keep par_dim first
-            moved_W[filter_row, filter_col, :, :, :, :] = nl.copy(
-                slice_W, 
-                shape=(n_tiles_c_out, nl.par_dim(c_out_pmax), n_tiles_c_in, c_in_pmax)
-            )
-
+            for inpt_c in nl.sequential_range(n_tiles_c_out):
+                for outpt_c in nl.sequential_range(n_tiles_c_in):
+                    moved_W[filter_row, filter_col, inpt_c, outpt_c, :, :] = nl.copy(W_sbuf[inpt_c, :, outpt_c, :, filter_row, filter_col])
             
 
     # - transpose that to get an array of shape (kernel_height, kernel_width, n_tiles_out_channels, n_tiles_in_channels, nl.par_dim(c_in_pmax), c_out_pmax), call this w
-    moved_W = moved_W.transpose(0, 1, 2, 3, 5, 4)
+    for filter_row in nl.sequential_range(filter_height):
+        for filter_col in nl.sequential_range(filter_width):
+            for inpt_c in nl.sequential_range(n_tiles_c_out):
+                for outpt_c in nl.sequential_range(n_tiles_c_in):
+                    moved_W[filter_row, filter_col, inpt_c, outpt_c, :, :] = nl.transpose(moved_W[filter_row, filter_col, inpt_c, outpt_c, :, :])
 
 
     #  the weights now are prepared for matrix multiply
@@ -161,6 +161,49 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
                                 # MATMUL WAS: matmul w[kernel_height, kernel_width, n_tile_c_out, n_tile_cin, :, :].T with x[n_tiles_c_in, :, out_row + kernel_height, kernel_width:kernel_width + out_width]
                 #     - copy stuff from PSUM back to SBUF
                 # - copy stuff from SBUF back to HBM
+
+        
+        # assign space in SBUF to store entire image, call it x
+        # shape : (n_tiles_c_in, nl.par_dim(c_in_pmax), image_height, image_width)
+        x = nl.ndarray(
+            shape=(n_tiles_c_in, nl.par_dim(c_in_pmax), input_height, input_width),
+            dtype=X.dtype,
+            buffer=nl.sbuf,
+        )
+
+        # loop over n_tiles_c_in:
+        for inpt_c in nl.sequential_range(n_tiles_c_in):
+            # load corresponding part of input image
+            x[inpt_c, :, :, :] = nl.load(X[b, inpt_c * c_in_pmax:(inpt_c + 1) * c_in_pmax, :, :])
+
+        # assign space in SBUF to store output
+        # shape : (nl.par_dim(c_out_pmax), out_height, out_width)
+        out = nl.ndarray(
+            shape=(nl.par_dim(c_out_pmax), out_height, out_width),
+            dtype=X.dtype,
+            buffer=nl.sbuf,
+        )
+
+        # loop over n_tiles_c_out:
+        for outpt_c in nl.sequential_range(n_tiles_c_out):
+            # assign space in PSUM to store output row
+            psum = nl.ndarray(
+                shape=(out_height, out_width),
+                dtype=X.dtype,
+                buffer=nl.psum,
+            )
+
+            # loop over output_rows:
+            for out_row in nl.affine_range(out_height):
+                for filter_row in nl.affine_range(filter_height):
+                    for filter_col in nl.affine_range(filter_width):
+                        for curr_c_in_tile in nl.affine_range(n_tiles_c_in):
+                            # matmul w[filter_row, filter_col, n_tile_c_out, n_tile_cin, :, :].T with
+                            # x[curr_c_in_tile, :, out_row + filter_row, kernel_width:kernel_width + filter_col]
+                            psum[out_row, :] += nl.matmul(moved_W[filter_row, filter_col, outpt_c, curr_c_in_tile, :, :].T, x[curr_c_in_tile, :, out_row + filter_row, out_width:out_width + filter_col])
+
+            # copy stuff from PSUM back to SBUF
+
 
         
 
