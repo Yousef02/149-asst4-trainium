@@ -67,12 +67,105 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
     # Various tiling dimensions (You may want to define more of them)
     c_in_pmax = nl.tile_size.pmax
     n_tiles_c_in = in_channels // c_in_pmax
+    c_out_pmax = nl.tile_size.pmax
+    n_tiles_c_out = out_channels // c_out_pmax
+
+    # - load in the weights into an SBUF array of shape (n_tiles_out_channels, nl.par_dim(c_out_pmax), n_tiles_in_channels, 128, kernel_height, kernel_width)
+    W_sbuf = nl.ndarray(
+        shape=(n_tiles_c_out, nl.par_dim(c_out_pmax), n_tiles_c_in, c_in_pmax, filter_height, filter_width),
+        dtype=W.dtype,
+        buffer=nl.sbuf,
+    )
+
+
+    for inpt_c in nl.sequential_range(n_tiles_c_out):
+        for outpt_c in nl.sequential_range(n_tiles_c_in):
+            # load using nl.load
+            i_x = inpt_c * c_out_pmax
+            i_y = outpt_c * c_in_pmax
+            W_sbuf[inpt_c, :, outpt_c, :, :, :] = nl.load(W[i_x:i_x + c_out_pmax, i_y:i_y + c_in_pmax, :, :])
+
+
+            # W_sbuf[inpt_c, :, outpt_c, :, :, :] = nl.load(W[inpt_c * c_out_pmax:(inpt_c + 1) * c_out_pmax, outpt_c * c_in_pmax:(outpt_c + 1) * c_in_pmax, :, :])
+
+
+
+
+    # - move data around using nl.copy to get an array of shape (kernel_height, kernel_width, n_tiles_out_channels, n_tiles_in_channels, nl.par_dim(c_out_pmax), c_in_pmax)
+    moved_W = nl.ndarray(
+        shape=(filter_height, filter_width, n_tiles_c_out, n_tiles_c_in, nl.par_dim(c_out_pmax), c_in_pmax),
+        dtype=W.dtype,
+        buffer=nl.sbuf,
+    )
+
+
+
+    for filter_row in nl.sequential_range(filter_height):
+        for filter_col in nl.sequential_range(filter_width):
+            # Slice over the first dimension (partition dimension) explicitly
+            slice_W = W_sbuf[:, :, :, :, filter_row, filter_col]  # Keep par_dim first
+            moved_W[filter_row, filter_col, :, :, :, :] = nl.copy(
+                slice_W, 
+                shape=(n_tiles_c_out, nl.par_dim(c_out_pmax), n_tiles_c_in, c_in_pmax)
+            )
+
+            
+
+    # - transpose that to get an array of shape (kernel_height, kernel_width, n_tiles_out_channels, n_tiles_in_channels, nl.par_dim(c_in_pmax), c_out_pmax), call this w
+    moved_W = moved_W.transpose(0, 1, 2, 3, 5, 4)
+
+
+    #  the weights now are prepared for matrix multiply
+
+
+
+
 
     # Process the images in batches
     for b in nl.affine_range(batch_size):
         # TODO: Perform the convolution of X[b] with the weights W and bias b, followed by a maxpool
         # and store the result in X_out[b]
+
+        # broad algorithm:
+        # W.shape (out_channels, in_channels, kernel_height, kernel_width)
+        # X.shape (batch_size, in_channels, image_hegiht, image_width)
+
+
+        # First of all, convince yourself that the matmuls would be carried out much more naturally
+        # if the weights are in the shape (kernel_height, kernel_width, in_channels, out_channels)
+
+        # both c_in_pmax and c_out_pmax are just 128, they are just used to represent which dimension they are encoding.
+        # n_tiles_c_in in in_channels // 128, n_tiles_c_out is out_channels // 128
+
+        
+
+        # Once we have this, we have prepared the weights for matrix multiply.
+
+        # loop over batch:
+        #     - assign space in SBUF to store entire image, call it x
+            # shape : (n_tiles_c_in, nl.par_dim(c_in_pmax), image_height, image_width)
+            # loop over n_tiles_c_in:
+            #     - load corresponding part of input image
+
+            # loop over n_tiles_c_out:
+            #     - assign space in SBUF to store output
+                # shape : (nl.par_dim(c_out_pmax), out_height, out_width)
+                # loop over output_rows:
+                #     - assign space in PSUM to store output row
+                #     for filter_row in nl.affine_range(kernel_height): # WAS: loop over kernel_height:
+                #         for filter_col in nl.affine_range(kernel_width):    # WAS: loop over kernel_width:
+                #             for curr_c_in_tile in nl.affine_range(n_tiles_c_in):    # WAS: loop over n_tiles_c_in:
+                #                 - matmul w[filter_row, filter_col, n_tile_c_out, n_tile_cin, :, :].T with
+                #                 x[curr_c_in_tile, :, out_row + filter_row, kernel_width:kernel_width + filter_col]
+                                
+                                # MATMUL WAS: matmul w[kernel_height, kernel_width, n_tile_c_out, n_tile_cin, :, :].T with x[n_tiles_c_in, :, out_row + kernel_height, kernel_width:kernel_width + out_width]
+                #     - copy stuff from PSUM back to SBUF
+                # - copy stuff from SBUF back to HBM
+
+        
+
+
+
         continue
 
     return X_out
-
