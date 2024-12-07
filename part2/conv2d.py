@@ -186,8 +186,8 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
 
         # loop over n_tiles_c_out:
         for outpt_c in nl.sequential_range(n_tiles_c_out):
-            # assign space in PSUM to store output row
-            psum = nl.ndarray(
+            # assign space in PSUM to store output 
+            psum_out = nl.ndarray(
                 shape=(out_height, out_width),
                 dtype=X.dtype,
                 buffer=nl.psum,
@@ -195,20 +195,62 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
 
             # loop over output_rows:
             for out_row in nl.affine_range(out_height):
+                # Allocate PSUM for the entire row
+                psum_row = nl.zeros(
+                    shape=(nl.par_dim(c_out_pmax), out_width),
+                    dtype=X.dtype,
+                    buffer=nl.psum,
+                )
+
                 for filter_row in nl.affine_range(filter_height):
                     for filter_col in nl.affine_range(filter_width):
                         for curr_c_in_tile in nl.affine_range(n_tiles_c_in):
-                            # matmul w[filter_row, filter_col, n_tile_c_out, n_tile_cin, :, :].T with
-                            # x[curr_c_in_tile, :, out_row + filter_row, kernel_width:kernel_width + filter_col]
-                            psum[out_row, :] += nl.matmul(moved_W[filter_row, filter_col, outpt_c, curr_c_in_tile, :, :].T, x[curr_c_in_tile, :, out_row + filter_row, out_width:out_width + filter_col])
+                            # Load the relevant weight tile
+                            weights_tile = moved_W[
+                                filter_row,
+                                filter_col,
+                                outpt_c,
+                                curr_c_in_tile,
+                                :, :,
+                            ]
 
-            # copy stuff from PSUM back to SBUF
+                            # Load the corresponding input slice
+                            input_tile = nl.ndarray(
+                                shape=(nl.par_dim(c_in_pmax), out_width),
+                                dtype=X.dtype,
+                                buffer=nl.sbuf,
+                            )
+                            input_tile[...] = x[
+                                curr_c_in_tile,
+                                :,
+                                out_row + filter_row,
+                                filter_col:filter_col + out_width,
+                            ]
+
+                            # Perform the matmul for the tile
+                            partial_sum = nl.matmul(weights_tile, input_tile, transpose_x=True)
+
+                            # Accumulate the results in PSUM
+                            psum_row += partial_sum
+
+                # Store the computed row back to SBUF
+                out[:, out_row, :] = psum_row
+
+            # Store the output tile from SBUF back to HBM
+            nl.store(
+                X_out[b, outpt_c * c_out_pmax:(outpt_c + 1) * c_out_pmax, :, :],
+                out,
+            )
+
+
+
+
 
 
         
 
 
 
-        continue
+        # continue
 
     return X_out
