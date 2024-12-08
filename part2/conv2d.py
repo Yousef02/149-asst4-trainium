@@ -165,7 +165,7 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
                 # assign space in PSUM to store output 
                 psum_out = nl.ndarray(
                     shape=(out_rows, out_width),
-                    dtype=X.dtype,
+                    dtype=nl.float32,
                     buffer=nl.psum,
                 )
 
@@ -174,7 +174,7 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
                     # Allocate PSUM for the entire row
                     psum_row = nl.zeros(
                         shape=(nl.par_dim(c_out_pmax), out_width),
-                        dtype=X.dtype,
+                        dtype=nl.float32,
                         buffer=nl.psum,
                     )
 
