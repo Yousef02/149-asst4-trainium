@@ -108,34 +108,34 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
 
     #  the weights now are prepared for matrix multiply
 
+    # variables for larger images loading
+    n_chunks = (input_height + c_in_pmax - 1) // c_in_pmax      # 1 for small, 2 for large
+    out_rows = (out_height + n_chunks - 1) // n_chunks        # how many output rows will be covered in one chunk
+    in_rows = out_rows + filter_height - 1                    # how many input rows will be covered in one chunk
+    print(n_chunks, out_rows, in_rows)
+
     # Process the images in batches
     for b in nl.affine_range(batch_size):
         # assign space in SBUF to store entire image, call it x
         x = nl.ndarray(
-            shape=(n_tiles_c_in, nl.par_dim(c_in_pmax), c_in_pmax + filter_height - 1, input_width),
+            shape=(n_tiles_c_in, nl.par_dim(c_in_pmax), in_rows, input_width),
             dtype=X.dtype,
             buffer=nl.sbuf,
         )
 
-        height_slices = (input_height + c_in_pmax - 1) // c_in_pmax
-        out_height_slice = (out_height + height_slices - 1) // height_slices
-        
-        for h_slice in nl.sequential_range(height_slices):
-            h_start = h_slice * c_in_pmax
-
+        for chunk in nl.sequential_range(n_chunks):
             # loop over n_tiles_c_in:
             for inpt_c in nl.sequential_range(n_tiles_c_in):
                 # load corresponding part of input image
-                #x[inpt_c, :, :, :] = nl.load(X[b, inpt_c * c_in_pmax:(inpt_c + 1) * c_in_pmax, :, :])
-                i_c, i_h, i_w  = nl.mgrid[0:c_in_pmax, 0:c_in_pmax + filter_height - 1, 0:input_width]
+                i_c, i_h, i_w  = nl.mgrid[0:c_in_pmax, 0:in_rows, 0:input_width]
                 x[inpt_c, :, :, :] = nl.load(
-                    X[b, i_c + (inpt_c * c_in_pmax), h_start + i_h, i_w], 
-                    mask=(h_start + i_h) < input_height
+                    X[b, i_c + (inpt_c * c_in_pmax), (chunk * in_rows) + i_h, i_w], 
+                    mask=((chunk * in_rows) + i_h) < input_height
                 )
 
             # assign space in SBUF to store output
             out = nl.ndarray(
-                shape=(nl.par_dim(c_out_pmax), out_height_slice, out_width),
+                shape=(nl.par_dim(c_out_pmax), out_rows, out_width),
                 dtype=X.dtype,
                 buffer=nl.sbuf,
             )
@@ -144,13 +144,13 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
             for outpt_c in nl.sequential_range(n_tiles_c_out):
                 # assign space in PSUM to store output 
                 psum_out = nl.ndarray(
-                    shape=(out_height_slice, out_width),
+                    shape=(out_rows, out_width),
                     dtype=X.dtype,
                     buffer=nl.psum,
                 )
 
                 # loop over output_rows:
-                for out_row in nl.affine_range(out_height_slice):
+                for out_row in nl.affine_range(out_rows):
                     # Allocate PSUM for the entire row
                     psum_row = nl.zeros(
                         shape=(nl.par_dim(c_out_pmax), out_width),
@@ -194,7 +194,7 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
 
                 # Store the output tile from SBUF back to HBM
                 nl.store(
-                    X_out[b, outpt_c * c_out_pmax:(outpt_c + 1) * c_out_pmax, h_slice * out_height_slice: (h_slice + 1) * out_height_slice, :],
+                    X_out[b, outpt_c * c_out_pmax:(outpt_c + 1) * c_out_pmax, chunk * out_rows: (chunk + 1) * out_rows, :],
                     out,
                 )
 
