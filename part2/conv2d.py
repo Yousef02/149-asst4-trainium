@@ -71,48 +71,65 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
     n_tiles_c_out = out_channels // c_out_pmax
 
     # - load in the weights into an SBUF array of shape (n_tiles_out_channels, nl.par_dim(c_out_pmax), n_tiles_in_channels, 128, kernel_height, kernel_width)
-    W_sbuf = nl.ndarray(
-        shape=(n_tiles_c_out, nl.par_dim(c_out_pmax), n_tiles_c_in, c_in_pmax, filter_height, filter_width),
-        dtype=W.dtype,
-        buffer=nl.sbuf,
-    )
+    # W_sbuf = nl.ndarray(
+    #     shape=(n_tiles_c_out, nl.par_dim(c_out_pmax), n_tiles_c_in, c_in_pmax, filter_height, filter_width),
+    #     dtype=W.dtype,
+    #     buffer=nl.sbuf,
+    # )
 
-    for inpt_c in nl.sequential_range(n_tiles_c_out):
-        for outpt_c in nl.sequential_range(n_tiles_c_in):
-            # load using nl.load
-            i_x = inpt_c * c_out_pmax
-            i_y = outpt_c * c_in_pmax
-            W_sbuf[inpt_c, :, outpt_c, :, :, :] = nl.load(W[i_x:i_x + c_out_pmax, i_y:i_y + c_in_pmax, :, :])
+    # for inpt_c in nl.sequential_range(n_tiles_c_out):
+    #     for outpt_c in nl.sequential_range(n_tiles_c_in):
+    #         # load using nl.load
+    #         i_x = inpt_c * c_out_pmax
+    #         i_y = outpt_c * c_in_pmax
+    #         W_sbuf[inpt_c, :, outpt_c, :, :, :] = nl.load(W[i_x:i_x + c_out_pmax, i_y:i_y + c_in_pmax, :, :])
 
-    # - move data around using nl.copy to get an array of shape (kernel_height, kernel_width, n_tiles_out_channels, n_tiles_in_channels, nl.par_dim(c_out_pmax), c_in_pmax)
-    moved_W = nl.ndarray(
-        shape=(filter_height, filter_width, n_tiles_c_out, n_tiles_c_in, nl.par_dim(c_out_pmax), c_in_pmax),
-        dtype=W.dtype,
-        buffer=nl.sbuf,
-    )
+    # # - move data around using nl.copy to get an array of shape (kernel_height, kernel_width, n_tiles_out_channels, n_tiles_in_channels, nl.par_dim(c_out_pmax), c_in_pmax)
+    # moved_W = nl.ndarray(
+    #     shape=(filter_height, filter_width, n_tiles_c_out, n_tiles_c_in, nl.par_dim(c_out_pmax), c_in_pmax),
+    #     dtype=W.dtype,
+    #     buffer=nl.sbuf,
+    # )
 
-    for filter_row in nl.sequential_range(filter_height):
-        for filter_col in nl.sequential_range(filter_width):
-            for inpt_c in nl.sequential_range(n_tiles_c_out):
-                for outpt_c in nl.sequential_range(n_tiles_c_in):
-                    moved_W[filter_row, filter_col, inpt_c, outpt_c, :, :] = nl.copy(W_sbuf[inpt_c, :, outpt_c, :, filter_row, filter_col])
+    # for filter_row in nl.sequential_range(filter_height):
+    #     for filter_col in nl.sequential_range(filter_width):
+    #         for inpt_c in nl.sequential_range(n_tiles_c_out):
+    #             for outpt_c in nl.sequential_range(n_tiles_c_in):
+    #                 moved_W[filter_row, filter_col, inpt_c, outpt_c, :, :] = nl.copy(W_sbuf[inpt_c, :, outpt_c, :, filter_row, filter_col])
             
 
-    # - transpose that to get an array of shape (kernel_height, kernel_width, n_tiles_out_channels, n_tiles_in_channels, nl.par_dim(c_in_pmax), c_out_pmax), call this w
-    for filter_row in nl.sequential_range(filter_height):
-        for filter_col in nl.sequential_range(filter_width):
-            for inpt_c in nl.sequential_range(n_tiles_c_out):
-                for outpt_c in nl.sequential_range(n_tiles_c_in):
-                    moved_W[filter_row, filter_col, inpt_c, outpt_c, :, :] = nl.transpose(moved_W[filter_row, filter_col, inpt_c, outpt_c, :, :])
+    # # - transpose that to get an array of shape (kernel_height, kernel_width, n_tiles_out_channels, n_tiles_in_channels, nl.par_dim(c_in_pmax), c_out_pmax), call this w
+    # for filter_row in nl.sequential_range(filter_height):
+    #     for filter_col in nl.sequential_range(filter_width):
+    #         for inpt_c in nl.sequential_range(n_tiles_c_out):
+    #             for outpt_c in nl.sequential_range(n_tiles_c_in):
+    #                 moved_W[filter_row, filter_col, inpt_c, outpt_c, :, :] = nl.transpose(moved_W[filter_row, filter_col, inpt_c, outpt_c, :, :])
 
+    W = W.reshape((n_tiles_c_out, c_out_pmax, n_tiles_c_in, c_in_pmax, filter_height, filter_width))
+    
+    weight_sbuf = nl.ndarray((n_tiles_c_out, nl.par_dim(c_out_pmax), n_tiles_c_in, c_in_pmax, filter_height, filter_width), dtype = W.dtype, buffer = nl.sbuf)
+    weight_copy = nl.ndarray((filter_height, filter_width, n_tiles_c_out, n_tiles_c_in, nl.par_dim(c_out_pmax), c_in_pmax), dtype=W.dtype, buffer=nl.sbuf)
+    w = nl.ndarray((filter_height, filter_width, n_tiles_c_out, n_tiles_c_in, nl.par_dim(c_in_pmax), c_out_pmax), dtype=W.dtype, buffer=nl.sbuf)
+
+    for c_out_tile in nl.affine_range(n_tiles_c_out):
+        weight_sbuf[c_out_tile] = nl.load(W[c_out_tile])
+
+    for c_out_tile in nl.affine_range(n_tiles_c_out):
+        for c_in_tile in nl.affine_range(n_tiles_c_in):
+            for i in nl.affine_range(filter_height):
+                for j in nl.affine_range(filter_width):
+                    weight_copy[i, j, c_out_tile, c_in_tile, :, :] = nl.copy(weight_sbuf[c_out_tile, :, c_in_tile, :, i, j], dtype = W.dtype)
+                    w[i, j, c_out_tile, c_in_tile] = nisa.nc_transpose(weight_copy[i, j, c_out_tile, c_in_tile])
 
     #  the weights now are prepared for matrix multiply
 
     # variables for larger images loading
-    n_chunks = (input_height + c_in_pmax - 1) // c_in_pmax      # 1 for small, 2 for large
-    out_rows = (out_height + n_chunks - 1) // n_chunks        # how many output rows will be covered in one chunk
+    #n_chunks = (input_height + c_in_pmax - 1) // c_in_pmax    # 1 for small, 2 for large
+    #out_rows = (out_height + n_chunks - 1) // n_chunks        # how many output rows will be covered in one chunk
+    out_rows = 2
+    n_chunks = (out_height + out_rows - 1) // out_rows
     in_rows = out_rows + filter_height - 1                    # how many input rows will be covered in one chunk
-    print(n_chunks, out_rows, in_rows)
+    print(n_chunks, out_rows, in_rows, input_height)
 
     # Process the images in batches
     for b in nl.affine_range(batch_size):
@@ -129,8 +146,8 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
                 # load corresponding part of input image
                 i_c, i_h, i_w  = nl.mgrid[0:c_in_pmax, 0:in_rows, 0:input_width]
                 x[inpt_c, :, :, :] = nl.load(
-                    X[b, i_c + (inpt_c * c_in_pmax), (chunk * in_rows) + i_h, i_w], 
-                    mask=((chunk * in_rows) + i_h) < input_height
+                    X[b, i_c + (inpt_c * c_in_pmax), (chunk * out_rows) + i_h, i_w], 
+                    mask=((chunk * out_rows) + i_h) < input_height
                 )
 
             # assign space in SBUF to store output
@@ -162,7 +179,7 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
                         for filter_col in nl.affine_range(filter_width):
                             for curr_c_in_tile in nl.affine_range(n_tiles_c_in):
                                 # Load the relevant weight tile
-                                weights_tile = moved_W[
+                                weights_tile = w[
                                     filter_row,
                                     filter_col,
                                     outpt_c,
@@ -194,7 +211,7 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
 
                 # Store the output tile from SBUF back to HBM
                 nl.store(
-                    X_out[b, outpt_c * c_out_pmax:(outpt_c + 1) * c_out_pmax, chunk * out_rows: (chunk + 1) * out_rows, :],
+                    X_out[b, outpt_c * c_out_pmax:(outpt_c + 1) * c_out_pmax, chunk * out_rows:(chunk + 1) * out_rows, :],
                     out,
                 )
 
