@@ -107,7 +107,7 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
 
     W = W.reshape((n_tiles_c_out, c_out_pmax, n_tiles_c_in, c_in_pmax, filter_height, filter_width))
     
-    weight_sbuf = nl.ndarray((n_tiles_c_out, nl.par_dim(c_out_pmax), n_tiles_c_in, c_in_pmax, filter_height, filter_width), dtype = W.dtype, buffer = nl.sbuf)
+    weight_sbuf = nl.ndarray((n_tiles_c_out, nl.par_dim(c_out_pmax), n_tiles_c_in, c_in_pmax, filter_height, filter_width), dtype=W.dtype, buffer=nl.sbuf)
     weight_copy = nl.ndarray((filter_height, filter_width, n_tiles_c_out, n_tiles_c_in, nl.par_dim(c_out_pmax), c_in_pmax), dtype=W.dtype, buffer=nl.sbuf)
     w = nl.ndarray((filter_height, filter_width, n_tiles_c_out, n_tiles_c_in, nl.par_dim(c_in_pmax), c_out_pmax), dtype=W.dtype, buffer=nl.sbuf)
 
@@ -129,7 +129,10 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
     out_rows = 2
     n_chunks = (out_height + out_rows - 1) // out_rows
     in_rows = out_rows + filter_height - 1                    # how many input rows will be covered in one chunk
-    print(n_chunks, out_rows, in_rows, input_height)
+
+    bias_sbuf = nl.ndarray((n_tiles_c_out, nl.par_dim(c_out_pmax), 1), dtype=W.dtype, buffer=nl.sbuf)
+    for c_out_tile in nl.affine_range(n_tiles_c_out):
+        bias_sbuf[c_out_tile] = nl.load(bias[c_out_tile * c_out_pmax:(c_out_tile + 1) * c_out_pmax])
 
     # Process the images in batches
     for b in nl.affine_range(batch_size):
@@ -209,10 +212,11 @@ def fused_conv2d_maxpool(X, W, bias, pool_size=1):
                     # Store the computed row back to SBUF
                     out[:, out_row, :] = psum_row
 
+                out_bias = nisa.tensor_scalar(out, np.add, bias_sbuf[outpt_c])
                 # Store the output tile from SBUF back to HBM
                 nl.store(
                     X_out[b, outpt_c * c_out_pmax:(outpt_c + 1) * c_out_pmax, chunk * out_rows:(chunk + 1) * out_rows, :],
-                    out,
+                    out_bias,
                 )
 
     return X_out
